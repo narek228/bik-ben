@@ -1,0 +1,46 @@
+"""
+Конфигурация бота. Все секреты берутся из .env — никогда не хардкодьте
+ключи прямо в коде, особенно если планируете выкладывать код в репозиторий.
+"""
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+
+YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "")
+YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "")
+
+NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY", "")
+NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET", "")
+
+PUBLIC_WEBHOOK_URL = os.getenv("PUBLIC_WEBHOOK_URL", "")
+
+# Во сколько раз цена для пользователя выше себестоимости API-запроса.
+# Например: если запрос стоит вам $0.01, а множитель 3.0 — с юзера спишется $0.03.
+MARKUP_MULTIPLIER = float(os.getenv("MARKUP_MULTIPLIER", "3.0"))
+
+# Курс для перевода долларов в "кредиты" внутреннего баланса.
+# 1 кредит = 1 рубль, чтобы пользователю были понятны цифры.
+# Стоимость токенов у провайдеров указана в USD, поэтому нужен курс USD->RUB.
+USD_TO_CREDIT_RATE = float(os.getenv("USD_TO_CREDIT_RATE", "100"))  # ~курс ЦБ, обновляйте вручную или через API
+
+# Стоимость моделей в USD за 1M токенов (input/output) — сверяйтесь с
+# актуальными ценами провайдеров, они меняются.
+MODEL_PRICING = {
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    "gpt-4o": {"input": 2.50, "output": 10.00},
+    "claude-haiku-4-5-20251001": {"input": 1.00, "output": 5.00},
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
+}
+
+DEFAULT_MODEL = "gpt-4o-mini"
+
+# Сколько кредитов дать новому пользователю бесплатно (маркетинг / тест-драйв)
+SIGNUP_BONUS_CREDITS = 20
+
+DB_PATH = "bot_database.sqlite3"
