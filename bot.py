@@ -8,6 +8,7 @@
 """
 import asyncio
 import logging
+import uuid
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
@@ -30,7 +31,7 @@ MODEL_LABELS = {
     "gpt-4o-mini": "ChatGPT (быстрый, gpt-4o-mini)",
     "gpt-4o": "ChatGPT (мощный, gpt-4o)",
     "claude-haiku-4-5-20251001": "Claude (быстрый, Haiku)",
-    "claude-sonnet-4-6": "Claude (мощный, Sonnet)",
+    "anthropic-claude-sonnet-4-6": "Claude (мощный, Sonnet)",
 }
 
 TOPUP_OPTIONS_RUB = [100, 300, 1000]  # варианты пополнения в рублях/долларах
@@ -84,16 +85,13 @@ async def cmd_topup(message: Message):
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"{amount}₽ — крипта", callback_data=f"topup:crypto:{amount}"
-                ),
-                InlineKeyboardButton(
-                    text=f"{amount}₽ — карта/СБП", callback_data=f"topup:yookassa:{amount}"
+                    text=f"{amount}₽ — карта (ЮMoney)", callback_data=f"topup:yoomoney:{amount}"
                 ),
             ]
             for amount in TOPUP_OPTIONS_RUB
         ]
     )
-    await message.answer("Выбери сумму и способ оплаты:", reply_markup=kb)
+    await message.answer("Выбери сумму пополнения:", reply_markup=kb)
 
 
 @dp.callback_query(F.data.startswith("topup:"))
@@ -104,7 +102,16 @@ async def cb_topup(callback: CallbackQuery):
     credits_to_add = amount  # 1 рубль = 1 кредит, см. config.USD_TO_CREDIT_RATE
 
     try:
-        if provider == "yookassa":
+        if provider == "yoomoney":
+            # label — наш собственный уникальный идентификатор платежа,
+            # ЮMoney вернёт его в уведомлении как есть.
+            label = str(uuid.uuid4())
+            link = payments.create_yoomoney_payment_link(amount, label)
+            await db.create_pending_payment(label, tg_id, "yoomoney", credits_to_add)
+            await callback.message.answer(
+                f"Оплати {amount}₽ по ссылке, кредиты начислятся автоматически:\n{link}"
+            )
+        elif provider == "yookassa":
             result = await payments.create_yookassa_payment(tg_id, amount, credits_to_add)
             await db.create_pending_payment(result["payment_id"], tg_id, "yookassa", credits_to_add)
             await callback.message.answer(
@@ -199,9 +206,44 @@ async def handle_nowpayments_webhook(request: web.Request):
     return web.Response(status=200, text="ok")
 
 
+# ---------- Webhook-сервер для ЮMoney ----------
+
+async def handle_yoomoney_webhook(request: web.Request):
+    """
+    ЮMoney шлёт POST с form-data (не JSON!) при каждом входящем переводе
+    на кошелёк. label — наш идентификатор платежа, который мы сами задали
+    при создании ссылки в payments.create_yoomoney_payment_link.
+    """
+    form = await request.post()
+    form_dict = dict(form)
+
+    if not payments.verify_yoomoney_notification(form_dict):
+        log.warning("Неверная подпись уведомления ЮMoney — запрос отклонён")
+        return web.Response(status=400, text="invalid signature")
+
+    label = form_dict.get("label", "")
+    pending = await db.get_pending_payment(label)
+    if pending and pending["status"] == "pending":
+        await db.add_credits(
+            pending["tg_id"], pending["amount_credits"], "topup_yoomoney", label
+        )
+        await db.mark_payment_paid(label)
+        try:
+            await bot.send_message(
+                pending["tg_id"],
+                f"Оплата получена! Начислено {pending['amount_credits']} кредитов.",
+            )
+        except Exception:
+            pass
+
+    # ЮMoney достаточно получить любой ответ 200 OK — тело не проверяется.
+    return web.Response(status=200, text="OK")
+
+
 async def start_webhook_server():
     app = web.Application()
     app.router.add_post("/webhook/nowpayments", handle_nowpayments_webhook)
+    app.router.add_post("/webhook/yoomoney", handle_yoomoney_webhook)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8080)

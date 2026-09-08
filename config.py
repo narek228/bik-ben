@@ -25,6 +25,14 @@ YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "")
 NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY", "")
 NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET", "")
 
+# ЮMoney (бывшие Яндекс.Деньги) — приём на личный кошелёк, без OAuth.
+# YOOMONEY_WALLET — номер кошелька (виден в настройках yoomoney.ru).
+# YOOMONEY_NOTIFICATION_SECRET — "секретное слово", которое ЮMoney выдаёт
+# на странице https://yoomoney.ru/transfer/myservices/http-notification
+# при подключении HTTP-уведомлений.
+YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "")
+YOOMONEY_NOTIFICATION_SECRET = os.getenv("YOOMONEY_NOTIFICATION_SECRET", "")
+
 PUBLIC_WEBHOOK_URL = os.getenv("PUBLIC_WEBHOOK_URL", "")
 
 # Во сколько раз цена для пользователя выше себестоимости API-запроса.
@@ -36,13 +44,14 @@ MARKUP_MULTIPLIER = float(os.getenv("MARKUP_MULTIPLIER", "3.0"))
 # Стоимость токенов у провайдеров указана в USD, поэтому нужен курс USD->RUB.
 USD_TO_CREDIT_RATE = float(os.getenv("USD_TO_CREDIT_RATE", "100"))  # ~курс ЦБ, обновляйте вручную или через API
 
-# Стоимость моделей в USD за 1M токенов (input/output) — сверяйтесь с
-# актуальными ценами провайдеров, они меняются.
+# Названия моделей ниже — точные слаги из каталога ML Router (mlrouter.ru).
+# Если подключаете другого провайдера/агрегатора — сверьтесь с его списком
+# моделей, слаги могут отличаться (например без префикса "anthropic-").
 MODEL_PRICING = {
     "gpt-4o-mini": {"input": 0.15, "output": 0.60},
     "gpt-4o": {"input": 2.50, "output": 10.00},
     "claude-haiku-4-5-20251001": {"input": 1.00, "output": 5.00},
-    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
+    "anthropic-claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
 }
 
 DEFAULT_MODEL = "gpt-4o-mini"
