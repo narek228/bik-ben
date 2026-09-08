@@ -12,13 +12,22 @@ from anthropic import AsyncAnthropic
 from config import (
     OPENAI_API_KEY,
     ANTHROPIC_API_KEY,
+    OPENAI_BASE_URL,
+    ANTHROPIC_BASE_URL,
     MODEL_PRICING,
     MARKUP_MULTIPLIER,
     USD_TO_CREDIT_RATE,
 )
 
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+# base_url=None означает "использовать официальный сервер по умолчанию" —
+# так работает и для прямого доступа, и для российских прокси вроде ProxyAPI,
+# если в .env указан OPENAI_BASE_URL / ANTHROPIC_BASE_URL.
+openai_client = (
+    AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL) if OPENAI_API_KEY else None
+)
+anthropic_client = (
+    AsyncAnthropic(api_key=ANTHROPIC_API_KEY, base_url=ANTHROPIC_BASE_URL) if ANTHROPIC_API_KEY else None
+)
 
 OPENAI_MODELS = {"gpt-4o-mini", "gpt-4o"}
 ANTHROPIC_MODELS = {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}

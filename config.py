@@ -12,6 +12,13 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
+# Если используете российский прокси-сервис (ProxyAPI и подобные) вместо
+# официальных серверов OpenAI/Anthropic — впишите его адрес сюда через .env.
+# Если оставить пустым — используются официальные серверы напрямую.
+# Пример для ProxyAPI: OPENAI_BASE_URL=https://api.proxyapi.ru/openai/v1
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "") or None
+ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "") or None
+
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "")
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "")
 
