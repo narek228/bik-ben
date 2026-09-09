@@ -51,17 +51,26 @@ def _tokens_to_credits(model: str, input_tokens: int, output_tokens: int) -> flo
     return round(cost_usd_with_markup * USD_TO_CREDIT_RATE, 4)
 
 
-async def generate(model: str, user_message: str, history: list[dict] | None = None) -> GenerationResult:
+async def generate(
+    model: str,
+    user_message: str,
+    history: list[dict] | None = None,
+    system_prompt: str | None = None,
+) -> GenerationResult:
     """
     history — список {"role": "user"/"assistant", "content": "..."} для контекста диалога.
     Если не нужен — оставьте None, бот будет отвечать без памяти прошлых сообщений.
+    system_prompt — задаёт "роль"/поведение модели на весь диалог (режимы /mode).
     """
     history = history or []
 
     if model in OPENAI_MODELS:
         if not openai_client:
             raise RuntimeError("OPENAI_API_KEY не задан в .env")
-        messages = history + [{"role": "user", "content": user_message}]
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages += history + [{"role": "user", "content": user_message}]
         resp = await openai_client.chat.completions.create(model=model, messages=messages)
         text = resp.choices[0].message.content
         usage = resp.usage
@@ -72,10 +81,12 @@ async def generate(model: str, user_message: str, history: list[dict] | None = N
         if anthropic_client:
             # Прямой доступ через официальный Anthropic API (или ANTHROPIC_BASE_URL=прокси
             # именно с anthropic-совместимым протоколом /v1/messages).
+            # У Anthropic системный промпт — отдельный параметр, а не сообщение в списке.
             messages = history + [{"role": "user", "content": user_message}]
-            resp = await anthropic_client.messages.create(
-                model=model, max_tokens=1024, messages=messages
-            )
+            kwargs = {"model": model, "max_tokens": 1024, "messages": messages}
+            if system_prompt:
+                kwargs["system"] = system_prompt
+            resp = await anthropic_client.messages.create(**kwargs)
             text = "".join(block.text for block in resp.content if block.type == "text")
             cost = _tokens_to_credits(model, resp.usage.input_tokens, resp.usage.output_tokens)
             return GenerationResult(text, cost, resp.usage.input_tokens, resp.usage.output_tokens)
@@ -84,7 +95,11 @@ async def generate(model: str, user_message: str, history: list[dict] | None = N
             # Fallback: агрегаторы вроде ML Router / OpenRouter отдают Claude через
             # тот же OpenAI-совместимый /v1/chat/completions — отдельный ключ
             # Anthropic не нужен, используем уже настроенный openai_client.
-            messages = history + [{"role": "user", "content": user_message}]
+            # Здесь системный промпт идёт как обычное сообщение role=system.
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages += history + [{"role": "user", "content": user_message}]
             resp = await openai_client.chat.completions.create(model=model, messages=messages)
             text = resp.choices[0].message.content
             usage = resp.usage
@@ -105,3 +120,19 @@ def estimate_max_cost(model: str, max_output_tokens: int = 1024, avg_input_token
     """Грубая оценка стоимости — используется, чтобы заранее проверить,
     хватит ли у пользователя баланса, ДО отправки запроса в API."""
     return _tokens_to_credits(model, avg_input_tokens, max_output_tokens)
+
+
+async def generate_image(prompt: str, model: str) -> str:
+    """
+    Генерирует изображение через OpenAI-совместимый /v1/images/generations
+    эндпоинт (так работает большинство агрегаторов вроде ML Router).
+    Возвращает URL готовой картинки.
+    ВНИМАНИЕ: если ваш агрегатор реализует картинки иначе (другой путь,
+    другой формат ответа) — этот вызов может упасть с ошибкой. Проверьте
+    в документации провайдера точный контракт эндпоинта для картинок.
+    """
+    if not openai_client:
+        raise RuntimeError("OPENAI_API_KEY не задан в .env — генерация картинок недоступна")
+
+    resp = await openai_client.images.generate(model=model, prompt=prompt, n=1, size="1024x1024")
+    return resp.data[0].url
