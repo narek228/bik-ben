@@ -9,6 +9,7 @@
 import asyncio
 import logging
 import uuid
+import base64
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command, CommandObject
@@ -19,6 +20,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     ReplyKeyboardMarkup,
     KeyboardButton,
+    BufferedInputFile,
 )
 from aiogram.client.default import DefaultBotProperties
 from aiohttp import web
@@ -298,8 +300,13 @@ async def run_image_generation(message: Message, prompt: str):
     await bot.send_chat_action(message.chat.id, "upload_photo")
 
     try:
-        image_url = await llm_client.generate_image(prompt, config.IMAGE_MODEL)
-        await message.answer_photo(photo=image_url, caption=f"«{prompt}»")
+        result = await llm_client.generate_image(prompt, config.IMAGE_MODEL)
+        if result.kind == "url":
+            await message.answer_photo(photo=result.data, caption=f"«{prompt}»")
+        else:  # "b64"
+            image_bytes = base64.b64decode(result.data)
+            photo = BufferedInputFile(image_bytes, filename="image.png")
+            await message.answer_photo(photo=photo, caption=f"«{prompt}»")
     except Exception as e:
         log.exception("Ошибка генерации картинки")
         await db.refund(tg_id, config.IMAGE_COST_CREDITS, reason="refund_image_error")

@@ -6,7 +6,9 @@
 """
 from dataclasses import dataclass
 import re
+import base64
 
+import aiohttp
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
 
@@ -40,6 +42,12 @@ class GenerationResult:
     cost_credits: float
     input_tokens: int
     output_tokens: int
+
+
+@dataclass
+class ImageResult:
+    kind: str  # "url" или "b64"
+    data: str  # сама ссылка, либо base64-строка данных картинки
 
 
 def _tokens_to_credits(model: str, input_tokens: int, output_tokens: int) -> float:
@@ -123,39 +131,44 @@ def estimate_max_cost(model: str, max_output_tokens: int = 1024, avg_input_token
     return _tokens_to_credits(model, avg_input_tokens, max_output_tokens)
 
 
-async def generate_image(prompt: str, model: str) -> str:
+async def generate_image(prompt: str, model: str) -> ImageResult:
     """
-    Подтверждено ответом API ML Router: эта модель поддерживает эндпоинты
-    images_generations / images_edits, но НЕ chat completions. Поэтому
-    основной путь — стандартный OpenAI-совместимый /v1/images/generations.
-    Возвращает URL готовой картинки.
+    У разных агрегаторов путь для генерации картинок отличается от
+    стандартного OpenAI /v1/images/generations — например, у OpenRouter это
+    просто /v1/images. Перебираем несколько вероятных вариантов пути и
+    форматов тела запроса, пока один не сработает.
+    Возвращает ImageResult с URL картинки либо её данными в base64.
     """
-    if not openai_client:
+    if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY не задан в .env — генерация картинок недоступна")
 
+    base = (OPENAI_BASE_URL or "https://api.openai.com/v1").rstrip("/")
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    payload = {"model": model, "prompt": prompt, "n": 1}
+
+    candidate_urls = [
+        f"{base}/images/generations",  # стандартный OpenAI-путь
+        f"{base}/images",              # укороченный путь, как у OpenRouter
+    ]
+
     errors = []
+    async with aiohttp.ClientSession() as session:
+        for url in candidate_urls:
+            try:
+                async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                    data = await resp.json()
+                    if resp.status != 200:
+                        errors.append(f"{url} → {resp.status}: {data}")
+                        continue
 
-    try:
-        img_resp = await openai_client.images.generate(model=model, prompt=prompt, n=1)
-        return img_resp.data[0].url
-    except Exception as e:
-        errors.append(f"images.generate: {e}")
+                    item = data.get("data", [{}])[0]
+                    if item.get("url"):
+                        return ImageResult(kind="url", data=item["url"])
+                    if item.get("b64_json"):
+                        return ImageResult(kind="b64", data=item["b64_json"])
 
-    # Фолбэк на chat completions — вдруг ссылка приходит текстом (у некоторых
-    # других моделей агрегатора бывает и так).
-    try:
-        resp = await openai_client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = resp.choices[0].message.content or ""
-        match = re.search(r"https?://\S+\.(?:png|jpe?g|webp|gif)\S*", text)
-        if not match:
-            match = re.search(r"https?://\S+", text)
-        if match:
-            return match.group(0).rstrip(").,!?»")
-        errors.append(f"chat: ответ без ссылки на картинку: {text[:150]}")
-    except Exception as e:
-        errors.append(f"chat: {e}")
+                    errors.append(f"{url} → 200, но нет ни url, ни b64_json в ответе: {data}")
+            except Exception as e:
+                errors.append(f"{url} → {e}")
 
     raise RuntimeError(" | ".join(errors))
