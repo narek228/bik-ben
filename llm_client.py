@@ -17,6 +17,8 @@ from config import (
     ANTHROPIC_API_KEY,
     OPENAI_BASE_URL,
     ANTHROPIC_BASE_URL,
+    IMAGE_BASE_URL,
+    IMAGE_MODEL,
     MODEL_PRICING,
     MARKUP_MULTIPLIER,
     USD_TO_CREDIT_RATE,
@@ -131,15 +133,25 @@ def estimate_max_cost(model: str, max_output_tokens: int = 1024, avg_input_token
     return _tokens_to_credits(model, avg_input_tokens, max_output_tokens)
 
 
-async def generate_image(prompt: str, model: str) -> ImageResult:
-    """Генерация изображения через официальный API LMRouter."""
+async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
+    """
+    Генерация изображения через официальный API LMRouter.
+
+    URL берётся из config.IMAGE_BASE_URL, а если переменная не задана —
+    из config.OPENAI_BASE_URL (для совместимости со старыми конфигами).
+    Модель по умолчанию — config.IMAGE_MODEL, если не передана явно.
+    """
     if not OPENAI_API_KEY:
         raise RuntimeError(
             "OPENAI_API_KEY не задан в .env — генерация картинок недоступна"
         )
 
-    base = "https://api.lmrouter.com/openai/v1"
+    # Берём URL из конфига. Если IMAGE_BASE_URL пуст — используем OPENAI_BASE_URL.
+    base = IMAGE_BASE_URL or OPENAI_BASE_URL or "https://api.lmrouter.com/openai/v1"
     url = f"{base}/images/generations"
+
+    # Если модель не передана — берём из конфига.
+    model = model or IMAGE_MODEL
 
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
