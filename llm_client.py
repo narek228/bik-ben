@@ -5,6 +5,7 @@
 (плюс наценка), а не фиксированную цену "за сообщение".
 """
 from dataclasses import dataclass
+import re
 
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
@@ -124,15 +125,36 @@ def estimate_max_cost(model: str, max_output_tokens: int = 1024, avg_input_token
 
 async def generate_image(prompt: str, model: str) -> str:
     """
-    Генерирует изображение через OpenAI-совместимый /v1/images/generations
-    эндпоинт (так работает большинство агрегаторов вроде ML Router).
+    У ML Router (и похожих агрегаторов) модели рисования картинок вроде
+    Firefly тарифицируются ЗА ТОКЕНЫ и помечены возможностью "текст" — это
+    означает, что они работают через обычный /v1/chat/completions, а не
+    через отдельный /v1/images/generations. Модель возвращает в тексте
+    ответа готовую ссылку на картинку (обычную или в markdown-формате
+    ![...](url)) — мы её оттуда вытаскиваем.
     Возвращает URL готовой картинки.
-    ВНИМАНИЕ: если ваш агрегатор реализует картинки иначе (другой путь,
-    другой формат ответа) — этот вызов может упасть с ошибкой. Проверьте
-    в документации провайдера точный контракт эндпоинта для картинок.
     """
     if not openai_client:
         raise RuntimeError("OPENAI_API_KEY не задан в .env — генерация картинок недоступна")
 
-    resp = await openai_client.images.generate(model=model, prompt=prompt, n=1, size="1024x1024")
-    return resp.data[0].url
+    try:
+        resp = await openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = resp.choices[0].message.content or ""
+    except Exception as chat_error:
+        # Фолбэк: вдруг всё же поддерживается классический images-эндпоинт.
+        try:
+            img_resp = await openai_client.images.generate(model=model, prompt=prompt, n=1)
+            return img_resp.data[0].url
+        except Exception:
+            raise chat_error
+
+    match = re.search(r"https?://\S+\.(?:png|jpe?g|webp|gif)\S*", text)
+    if not match:
+        match = re.search(r"https?://\S+", text)  # любая ссылка как последний шанс
+    if not match:
+        raise RuntimeError(
+            f"Модель не вернула ссылку на картинку, а вернула текст: {text[:200]}"
+        )
+    return match.group(0).rstrip(").,!?»")
