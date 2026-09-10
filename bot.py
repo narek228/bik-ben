@@ -43,10 +43,8 @@ MODEL_LABELS = {
     "anthropic-claude-sonnet-4-6": "Claude (мощный, Sonnet)",
 }
 
-TOPUP_OPTIONS_RUB = [100, 300, 1000]  # варианты пополнения в рублях/долларах
+TOPUP_OPTIONS_RUB = [100, 300, 1000]
 
-# Подписи кнопок нижнего меню — сюда же роутится текст, когда юзер их нажимает
-# (обычное текстовое сообщение с этим же содержимым, Telegram API так устроен).
 BTN_MODEL = "🧠 Модель"
 BTN_MODE = "🎭 Режим"
 BTN_IMAGE = "🖼 Картинка"
@@ -65,7 +63,7 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=BTN_TOPUP), KeyboardButton(text=BTN_CLEAR)],
             [KeyboardButton(text=BTN_REF), KeyboardButton(text=BTN_HELP)],
         ],
-        resize_keyboard=True,  # компактный размер кнопок вместо занимания полэкрана
+        resize_keyboard=True,
     )
 
 HELP_TEXT = (
@@ -85,13 +83,9 @@ HELP_TEXT = (
 )
 
 
-# ---------- Команды ----------
-
 @dp.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject):
     tg_id = message.from_user.id
-
-    # Реферальная ссылка выглядит как t.me/bot?start=ref_123456789
     referred_by = None
     if command.args and command.args.startswith("ref_"):
         try:
@@ -99,17 +93,11 @@ async def cmd_start(message: Message, command: CommandObject):
         except ValueError:
             referred_by = None
 
-    is_new = (await db.get_balance(tg_id)) == 0 and not await db.get_referrer(tg_id)
-    # Более надёжная проверка "новый ли пользователь" — до создания записи в БД.
     existing = await db.get_or_create_user(tg_id, message.from_user.username, referred_by=referred_by)
-
     user = existing
 
-    # Если реферальная привязка только что удачно применилась — начисляем бонусы.
     actual_referrer = await db.get_referrer(tg_id)
     if referred_by and actual_referrer == referred_by:
-        # Проверяем, что бонус ещё не выдавался (по факту наличия транзакции
-        # достаточно того, что привязка произошла только что при создании).
         await db.add_credits(tg_id, config.REFERRAL_BONUS_FOR_NEWCOMER, "referral_bonus_newcomer")
         await db.add_credits(referred_by, config.REFERRAL_BONUS_FOR_REFERRER, "referral_bonus_referrer")
         try:
@@ -133,7 +121,7 @@ async def cmd_start(message: Message, command: CommandObject):
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
-    await message.answer(HELP_TEXT)
+    await message.answer(HELP_TEXT, reply_markup=main_menu_keyboard())
 
 
 @dp.message(Command("balance"))
@@ -222,13 +210,21 @@ async def cmd_topup(message: Message):
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"{amount}₽ — карта (ЮMoney)", callback_data=f"topup:yoomoney:{amount}"
+                    text=f"{amount}₽ — ЮMoney", callback_data=f"topup:yoomoney:{amount}"
+                ),
+            ]
+            for amount in TOPUP_OPTIONS_RUB
+        ]
+        + [
+            [
+                InlineKeyboardButton(
+                    text=f"{amount}₽ — карта (ЮKassa)", callback_data=f"topup:yookassa:{amount}"
                 ),
             ]
             for amount in TOPUP_OPTIONS_RUB
         ]
     )
-    await message.answer("Выбери сумму пополнения:", reply_markup=kb)
+    await message.answer("Выбери сумму и способ пополнения:", reply_markup=kb)
 
 
 @dp.callback_query(F.data.startswith("topup:"))
@@ -236,12 +232,10 @@ async def cb_topup(callback: CallbackQuery):
     _, provider, amount_str = callback.data.split(":")
     amount = float(amount_str)
     tg_id = callback.from_user.id
-    credits_to_add = amount  # 1 рубль = 1 кредит, см. config.USD_TO_CREDIT_RATE
+    credits_to_add = amount
 
     try:
         if provider == "yoomoney":
-            # label — наш собственный уникальный идентификатор платежа,
-            # ЮMoney вернёт его в уведомлении как есть.
             label = str(uuid.uuid4())
             link = payments.create_yoomoney_payment_link(amount, label)
             await db.create_pending_payment(label, tg_id, "yoomoney", credits_to_add)
@@ -253,14 +247,6 @@ async def cb_topup(callback: CallbackQuery):
             await db.create_pending_payment(result["payment_id"], tg_id, "yookassa", credits_to_add)
             await callback.message.answer(
                 f"Оплати {amount}₽ по ссылке, кредиты начислятся автоматически:\n{result['confirmation_url']}"
-            )
-        elif provider == "crypto":
-            amount_usd = round(amount / config.USD_TO_CREDIT_RATE * 100, 2)  # грубая конвертация для примера
-            result = await payments.create_crypto_invoice(tg_id, amount_usd, credits_to_add)
-            await db.create_pending_payment(result["payment_id"], tg_id, "nowpayments", credits_to_add)
-            await callback.message.answer(
-                f"Оплати эквивалент {amount}₽ в крипте по ссылке:\n{result['invoice_url']}\n\n"
-                f"Кредиты начислятся автоматически после подтверждения в сети."
             )
         await callback.answer()
     except Exception as e:
@@ -303,7 +289,7 @@ async def run_image_generation(message: Message, prompt: str):
         result = await llm_client.generate_image(prompt, config.IMAGE_MODEL)
         if result.kind == "url":
             await message.answer_photo(photo=result.data, caption=f"«{prompt}»")
-        else:  # "b64"
+        else:
             image_bytes = base64.b64decode(result.data)
             photo = BufferedInputFile(image_bytes, filename="image.png")
             await message.answer_photo(photo=photo, caption=f"«{prompt}»")
@@ -317,9 +303,6 @@ async def run_image_generation(message: Message, prompt: str):
             f"и поправьте IMAGE_MODEL в настройках."
         )
 
-
-# ---------- Кнопки нижнего меню ----------
-# Reply-кнопки приходят как обычный текст — роутим на существующие команды.
 
 @dp.message(F.text == BTN_MODEL)
 async def btn_model(message: Message):
@@ -364,8 +347,6 @@ async def btn_image(message: Message):
     )
 
 
-# ---------- Генерация ответов ----------
-
 @dp.message(F.text)
 async def handle_generation(message: Message):
     tg_id = message.from_user.id
@@ -374,7 +355,6 @@ async def handle_generation(message: Message):
     mode = user.get("mode", "default")
     system_prompt = config.PROMPT_MODES.get(mode, {}).get("system_prompt")
 
-    # 1. Прикидываем максимальную возможную стоимость и проверяем баланс ДО запроса.
     estimated_cost = llm_client.estimate_max_cost(model)
     if user["balance"] < estimated_cost:
         await message.answer(
@@ -383,8 +363,6 @@ async def handle_generation(message: Message):
         )
         return
 
-    # 2. Резервируем (списываем) оценочную стоимость сразу — защита от гонки
-    # запросов, если юзер шлёт несколько сообщений одновременно.
     charged = await db.try_charge(tg_id, estimated_cost, reason="generation_reserved")
     if not charged:
         await message.answer("Недостаточно кредитов. Пополни баланс: /topup")
@@ -392,7 +370,6 @@ async def handle_generation(message: Message):
 
     await bot.send_chat_action(message.chat.id, "typing")
 
-    # Подтягиваем историю диалога ДО текущего сообщения — иначе оно задвоится.
     history = await db.get_recent_messages(tg_id)
 
     try:
@@ -405,20 +382,15 @@ async def handle_generation(message: Message):
         await message.answer(f"Ошибка при обращении к модели, кредиты возвращены. ({e})")
         return
 
-    # 3. Корректируем списание: возвращаем разницу между оценкой и фактом.
     difference = estimated_cost - result.cost_credits
     if difference > 0:
         await db.refund(tg_id, difference, reason="refund_overestimate")
 
-    # 4. Сохраняем и вопрос, и ответ в историю — на следующий запрос модель
-    # снова увидит этот обмен как часть контекста диалога.
     await db.add_message(tg_id, "user", message.text)
     await db.add_message(tg_id, "assistant", result.text)
 
     await message.answer(result.text)
 
-
-# ---------- Webhook-сервер для NOWPayments ----------
 
 async def handle_nowpayments_webhook(request: web.Request):
     raw_body = await request.read()
@@ -450,14 +422,8 @@ async def handle_nowpayments_webhook(request: web.Request):
     return web.Response(status=200, text="ok")
 
 
-# ---------- Webhook-сервер для ЮMoney ----------
-
 async def handle_yoomoney_webhook(request: web.Request):
-    """
-    ЮMoney шлёт POST с form-data (не JSON!) при каждом входящем переводе
-    на кошелёк. label — наш идентификатор платежа, который мы сами задали
-    при создании ссылки в payments.create_yoomoney_payment_link.
-    """
+    """ЮMoney уведомления об оплате."""
     form = await request.post()
     form_dict = dict(form)
 
@@ -480,14 +446,44 @@ async def handle_yoomoney_webhook(request: web.Request):
         except Exception:
             pass
 
-    # ЮMoney достаточно получить любой ответ 200 OK — тело не проверяется.
     return web.Response(status=200, text="OK")
+
+
+async def handle_yookassa_webhook(request: web.Request):
+    """ЮKassa уведомления об оплате."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.Response(status=400, text="invalid json")
+
+    event = data.get("event")
+    payment_obj = data.get("object", {})
+    payment_id = payment_obj.get("id")
+    status = payment_obj.get("status")
+
+    if event == "payment.succeeded" and status == "succeeded":
+        pending = await db.get_pending_payment(payment_id)
+        if pending and pending["status"] == "pending":
+            await db.add_credits(
+                pending["tg_id"], pending["amount_credits"], "topup_yookassa", payment_id
+            )
+            await db.mark_payment_paid(payment_id)
+            try:
+                await bot.send_message(
+                    pending["tg_id"],
+                    f"Оплата получена! Начислено {pending['amount_credits']} кредитов.",
+                )
+            except Exception:
+                pass
+
+    return web.Response(status=200, text="ok")
 
 
 async def start_webhook_server():
     app = web.Application()
     app.router.add_post("/webhook/nowpayments", handle_nowpayments_webhook)
     app.router.add_post("/webhook/yoomoney", handle_yoomoney_webhook)
+    app.router.add_post("/webhook/yookassa", handle_yookassa_webhook)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8080)
@@ -496,46 +492,41 @@ async def start_webhook_server():
 
 
 async def poll_yookassa_pending_payments():
-    """
-    ЮKassa поддерживает вебхуки, но их настройка требует подтверждённого
-    HTTPS-домена в личном кабинете. Для старта проще и надёжнее опрашивать
-    статус висящих платежей самим — раз в 10 секунд проверяем каждый
-    'pending' платёж через API и начисляем кредиты, если он оплачен.
-    Когда обзаведётесь доменом — замените на нормальный webhook-хендлер.
-    """
+    """Проверяем статусы ЮKassa платежей раз в 10 секунд."""
     import aiosqlite
 
     while True:
         await asyncio.sleep(10)
-        async with aiosqlite.connect(config.DB_PATH) as conn:
-            conn.row_factory = aiosqlite.Row
-            cur = await conn.execute(
-                "SELECT * FROM pending_payments WHERE provider = 'yookassa' AND status = 'pending'"
-            )
-            rows = await cur.fetchall()
-
-        for row in rows:
-            try:
-                status = await payments.check_yookassa_payment_status(row["payment_id"])
-            except Exception:
-                log.exception("Ошибка проверки статуса ЮKassa для %s", row["payment_id"])
-                continue
-
-            if status == "succeeded":
-                await db.add_credits(
-                    row["tg_id"], row["amount_credits"], "topup_yookassa", row["payment_id"]
+        try:
+            async with aiosqlite.connect(config.DB_PATH) as conn:
+                conn.row_factory = aiosqlite.Row
+                cur = await conn.execute(
+                    "SELECT * FROM pending_payments WHERE provider = 'yookassa' AND status = 'pending'"
                 )
-                await db.mark_payment_paid(row["payment_id"])
+                rows = await cur.fetchall()
+
+            for row in rows:
                 try:
-                    await bot.send_message(
-                        row["tg_id"],
-                        f"Оплата получена! Начислено {row['amount_credits']} кредитов.",
-                    )
+                    status = await payments.check_yookassa_payment_status(row["payment_id"])
                 except Exception:
-                    pass
+                    log.exception("Ошибка проверки статуса ЮKassa для %s", row["payment_id"])
+                    continue
 
+                if status == "succeeded":
+                    await db.add_credits(
+                        row["tg_id"], row["amount_credits"], "topup_yookassa", row["payment_id"]
+                    )
+                    await db.mark_payment_paid(row["payment_id"])
+                    try:
+                        await bot.send_message(
+                            row["tg_id"],
+                            f"Оплата получена! Начислено {row['amount_credits']} кредитов.",
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            log.exception("Ошибка в poll_yookassa_pending_payments")
 
-# ---------- Точка входа ----------
 
 async def main():
     await db.init_db()
