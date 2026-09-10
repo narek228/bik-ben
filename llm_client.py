@@ -125,36 +125,37 @@ def estimate_max_cost(model: str, max_output_tokens: int = 1024, avg_input_token
 
 async def generate_image(prompt: str, model: str) -> str:
     """
-    У ML Router (и похожих агрегаторов) модели рисования картинок вроде
-    Firefly тарифицируются ЗА ТОКЕНЫ и помечены возможностью "текст" — это
-    означает, что они работают через обычный /v1/chat/completions, а не
-    через отдельный /v1/images/generations. Модель возвращает в тексте
-    ответа готовую ссылку на картинку (обычную или в markdown-формате
-    ![...](url)) — мы её оттуда вытаскиваем.
+    Подтверждено ответом API ML Router: эта модель поддерживает эндпоинты
+    images_generations / images_edits, но НЕ chat completions. Поэтому
+    основной путь — стандартный OpenAI-совместимый /v1/images/generations.
     Возвращает URL готовой картинки.
     """
     if not openai_client:
         raise RuntimeError("OPENAI_API_KEY не задан в .env — генерация картинок недоступна")
 
+    errors = []
+
+    try:
+        img_resp = await openai_client.images.generate(model=model, prompt=prompt, n=1)
+        return img_resp.data[0].url
+    except Exception as e:
+        errors.append(f"images.generate: {e}")
+
+    # Фолбэк на chat completions — вдруг ссылка приходит текстом (у некоторых
+    # других моделей агрегатора бывает и так).
     try:
         resp = await openai_client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
         )
         text = resp.choices[0].message.content or ""
-    except Exception as chat_error:
-        # Фолбэк: вдруг всё же поддерживается классический images-эндпоинт.
-        try:
-            img_resp = await openai_client.images.generate(model=model, prompt=prompt, n=1)
-            return img_resp.data[0].url
-        except Exception:
-            raise chat_error
+        match = re.search(r"https?://\S+\.(?:png|jpe?g|webp|gif)\S*", text)
+        if not match:
+            match = re.search(r"https?://\S+", text)
+        if match:
+            return match.group(0).rstrip(").,!?»")
+        errors.append(f"chat: ответ без ссылки на картинку: {text[:150]}")
+    except Exception as e:
+        errors.append(f"chat: {e}")
 
-    match = re.search(r"https?://\S+\.(?:png|jpe?g|webp|gif)\S*", text)
-    if not match:
-        match = re.search(r"https?://\S+", text)  # любая ссылка как последний шанс
-    if not match:
-        raise RuntimeError(
-            f"Модель не вернула ссылку на картинку, а вернула текст: {text[:200]}"
-        )
-    return match.group(0).rstrip(").,!?»")
+    raise RuntimeError(" | ".join(errors))
