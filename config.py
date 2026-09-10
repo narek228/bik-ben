@@ -19,6 +19,12 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "") or None
 ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "") or None
 
+# Отдельный URL для генерации картинок. У LMRouter адрес для картинок может
+# отличаться от текстового. Если переменная не задана — код должен
+# использовать OPENAI_BASE_URL как запасной вариант.
+# В Railway → Variables задайте: IMAGE_BASE_URL=https://api.lmrouter.com/openai/v1
+IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "") or None
+
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "")
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "")
 
@@ -60,6 +66,10 @@ DEFAULT_MODEL = "gpt-4o-mini"
 # Слаг модели для картинок — сверьте с актуальным каталогом вашего провайдера
 # (mlrouter.ru → поиск "image" в списке моделей). Указанный ниже — Adobe
 # Firefly через ML Router, встречался в каталоге на момент настройки.
+#
+# ВАЖНО: если после смены IMAGE_BASE_URL появится ошибка "model not found",
+# проверьте актуальный слаг в кабинете LMRouter и переопределите через
+# переменную окружения IMAGE_MODEL в Railway (не правьте код).
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "closerouter-adobe-firefly-image-5")
 
 # Фиксированная цена одной картинки в кредитах (генерация изображений обычно
