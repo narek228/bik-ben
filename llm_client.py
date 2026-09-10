@@ -132,43 +132,61 @@ def estimate_max_cost(model: str, max_output_tokens: int = 1024, avg_input_token
 
 
 async def generate_image(prompt: str, model: str) -> ImageResult:
-    """
-    У разных агрегаторов путь для генерации картинок отличается от
-    стандартного OpenAI /v1/images/generations — например, у OpenRouter это
-    просто /v1/images. Перебираем несколько вероятных вариантов пути и
-    форматов тела запроса, пока один не сработает.
-    Возвращает ImageResult с URL картинки либо её данными в base64.
-    """
+    """Генерация изображения через официальный API LMRouter."""
     if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY не задан в .env — генерация картинок недоступна")
+        raise RuntimeError(
+            "OPENAI_API_KEY не задан в .env — генерация картинок недоступна"
+        )
 
-    base = (OPENAI_BASE_URL or "https://api.openai.com/v1").rstrip("/")
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": model, "prompt": prompt, "n": 1}
+    base = "https://api.lmrouter.com/openai/v1"
+    url = f"{base}/images/generations"
 
-    candidate_urls = [
-        f"{base}/images/generations",  # стандартный OpenAI-путь
-        f"{base}/images",              # укороченный путь, как у OpenRouter
-    ]
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
-    errors = []
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "n": 1,
+    }
+
     async with aiohttp.ClientSession() as session:
-        for url in candidate_urls:
-            try:
-                async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+        try:
+            async with session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                try:
                     data = await resp.json()
-                    if resp.status != 200:
-                        errors.append(f"{url} → {resp.status}: {data}")
-                        continue
+                except Exception:
+                    data = {"raw_response": await resp.text()}
 
-                    item = data.get("data", [{}])[0]
-                    if item.get("url"):
-                        return ImageResult(kind="url", data=item["url"])
-                    if item.get("b64_json"):
-                        return ImageResult(kind="b64", data=item["b64_json"])
+                if resp.status != 200:
+                    raise RuntimeError(
+                        f"LMRouter image API → {resp.status}: {data}"
+                    )
 
-                    errors.append(f"{url} → 200, но нет ни url, ни b64_json в ответе: {data}")
-            except Exception as e:
-                errors.append(f"{url} → {e}")
+                items = data.get("data")
+                if not items:
+                    raise RuntimeError(
+                        f"LMRouter вернул неожиданный ответ: {data}"
+                    )
 
-    raise RuntimeError(" | ".join(errors))
+                item = items[0]
+
+                if item.get("url"):
+                    return ImageResult(kind="url", data=item["url"])
+
+                if item.get("b64_json"):
+                    return ImageResult(kind="b64", data=item["b64_json"])
+
+                raise RuntimeError(
+                    f"В ответе LMRouter нет url или b64_json: {data}"
+                )
+
+        except aiohttp.ClientError as e:
+            raise RuntimeError(f"Ошибка соединения с LMRouter: {e}") from e
