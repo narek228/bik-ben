@@ -8,6 +8,7 @@
 """
 import asyncio
 import logging
+import re
 import uuid
 import base64
 
@@ -54,6 +55,19 @@ BTN_CLEAR = "🧹 Очистить память"
 BTN_REF = "👥 Реферальная ссылка"
 BTN_HELP = "❓ Помощь"
 
+# Фразы, по которым обычное сообщение считается запросом на картинку
+IMAGE_TRIGGER_RE = re.compile(
+    r"^\s*("
+    r"нарисуй|нарисовать|нарисуйте|"
+    r"сгенерируй\s+(картинку|изображение|image)|"
+    r"сгенерировать\s+(картинку|изображение)|"
+    r"создай\s+(картинку|изображение)|"
+    r"сделай\s+(картинку|изображение|рисунок)|"
+    r"draw|generate\s+image|image:|/image"
+    r")\s*[:\-–]?\s*",
+    re.IGNORECASE | re.UNICODE,
+)
+
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -77,9 +91,9 @@ HELP_TEXT = (
     "/clear — стереть память текущего диалога (начать с чистого листа)\n"
     "/ref — реферальная ссылка и статистика приглашений\n"
     "/help — это сообщение\n\n"
-    "Просто напиши сообщение — отвечу через выбранную модель, помня контекст "
-    "последних сообщений (если не сбросить через /clear). Внизу есть меню "
-    "с быстрыми кнопками для тех же действий."
+    "Просто напиши сообщение — отвечу через выбранную модель.\n"
+    "Если начнёшь с «нарисуй …» или «сгенерируй картинку …» — сразу сделаю картинку.\n"
+    "Внизу есть меню с быстрыми кнопками."
 )
 
 
@@ -261,7 +275,8 @@ async def cmd_image(message: Message, command: CommandObject):
     if not prompt:
         await message.answer(
             "Опиши, что нарисовать, после команды. Например:\n"
-            "<code>/image рыжий кот в скафандре на Марсе</code>"
+            "<code>/image рыжий кот в скафандре на Марсе</code>\n\n"
+            "Или просто напиши: <code>нарисуй рыжий кот в скафандре на Марсе</code>"
         )
         return
     await run_image_generation(message, prompt)
@@ -270,6 +285,11 @@ async def cmd_image(message: Message, command: CommandObject):
 async def run_image_generation(message: Message, prompt: str):
     tg_id = message.from_user.id
     user = await db.get_or_create_user(tg_id, message.from_user.username)
+
+    prompt = (prompt or "").strip()
+    if not prompt:
+        await message.answer("Нужно описание картинки.")
+        return
 
     if user["balance"] < config.IMAGE_COST_CREDITS:
         await message.answer(
@@ -297,10 +317,10 @@ async def run_image_generation(message: Message, prompt: str):
         log.exception("Ошибка генерации картинки")
         await db.refund(tg_id, config.IMAGE_COST_CREDITS, reason="refund_image_error")
         await message.answer(
-            f"Не удалось сгенерировать картинку, кредиты возвращены. ({e})\n\n"
-            f"Возможная причина: у вашего провайдера другой формат ответа для "
-            f"картинок или другое название модели — сверьтесь с их документацией "
-            f"и поправьте IMAGE_MODEL в настройках."
+            f"Не удалось сгенерировать картинку, кредиты возвращены.\n\n"
+            f"Ошибка: <code>{e}</code>\n\n"
+            f"Проверьте IMAGE_MODEL и IMAGE_BASE_URL в .env / Railway. "
+            f"Слаг модели должен совпадать с каталогом вашего провайдера."
         )
 
 
@@ -342,13 +362,34 @@ async def btn_help(message: Message):
 @dp.message(F.text == BTN_IMAGE)
 async def btn_image(message: Message):
     await message.answer(
-        "Напиши так: <code>/image описание картинки</code>\n"
-        "Например: <code>/image рыжий кот в скафандре на Марсе</code>"
+        "Напиши описание картинки одним из способов:\n\n"
+        "• <code>/image рыжий кот в скафандре на Марсе</code>\n"
+        "• <code>нарисуй рыжий кот в скафандре на Марсе</code>\n"
+        "• <code>сгенерируй картинку: закат над океаном</code>"
     )
+
+
+def _extract_image_prompt(text: str) -> str | None:
+    """Если сообщение — запрос на картинку, возвращает очищенный промпт."""
+    if not text:
+        return None
+    m = IMAGE_TRIGGER_RE.match(text)
+    if not m:
+        return None
+    prompt = text[m.end():].strip()
+    return prompt if prompt else None
 
 
 @dp.message(F.text)
 async def handle_generation(message: Message):
+    text = (message.text or "").strip()
+
+    # Автоопределение запроса на картинку по ключевым словам
+    image_prompt = _extract_image_prompt(text)
+    if image_prompt is not None:
+        await run_image_generation(message, image_prompt)
+        return
+
     tg_id = message.from_user.id
     user = await db.get_or_create_user(tg_id, message.from_user.username)
     model = user["model"]
@@ -374,7 +415,7 @@ async def handle_generation(message: Message):
 
     try:
         result = await llm_client.generate(
-            model, message.text, history=history, system_prompt=system_prompt
+            model, text, history=history, system_prompt=system_prompt
         )
     except Exception as e:
         log.exception("Ошибка генерации")
@@ -386,7 +427,7 @@ async def handle_generation(message: Message):
     if difference > 0:
         await db.refund(tg_id, difference, reason="refund_overestimate")
 
-    await db.add_message(tg_id, "user", message.text)
+    await db.add_message(tg_id, "user", text)
     await db.add_message(tg_id, "assistant", result.text)
 
     await message.answer(result.text)

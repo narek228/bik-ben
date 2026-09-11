@@ -5,7 +5,6 @@
 (плюс наценка), а не фиксированную цену "за сообщение".
 """
 from dataclasses import dataclass
-import re
 import base64
 
 import aiohttp
@@ -135,22 +134,22 @@ def estimate_max_cost(model: str, max_output_tokens: int = 1024, avg_input_token
 
 async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
     """
-    Генерация изображения через официальный API LMRouter.
+    Генерация изображения через OpenAI-совместимый /images/generations.
 
     URL берётся из config.IMAGE_BASE_URL, а если переменная не задана —
     из config.OPENAI_BASE_URL (для совместимости со старыми конфигами).
     Модель по умолчанию — config.IMAGE_MODEL, если не передана явно.
+
+    Поддерживает ответы с url и с b64_json (разные провайдеры отдают по-разному).
     """
     if not OPENAI_API_KEY:
         raise RuntimeError(
             "OPENAI_API_KEY не задан в .env — генерация картинок недоступна"
         )
 
-    # Берём URL из конфига. Если IMAGE_BASE_URL пуст — используем OPENAI_BASE_URL.
-    base = IMAGE_BASE_URL or OPENAI_BASE_URL or "https://api.lmrouter.com/openai/v1"
+    base = (IMAGE_BASE_URL or OPENAI_BASE_URL or "https://api.openai.com/v1").rstrip("/")
     url = f"{base}/images/generations"
 
-    # Если модель не передана — берём из конфига.
     model = model or IMAGE_MODEL
 
     headers = {
@@ -158,10 +157,13 @@ async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
         "Content-Type": "application/json",
     }
 
+    # Большинство OpenAI-совместимых провайдеров понимают эти поля.
+    # response_format=b64_json удобнее для Telegram (не нужно скачивать url).
     payload = {
         "model": model,
         "prompt": prompt,
         "n": 1,
+        "response_format": "b64_json",
     }
 
     async with aiohttp.ClientSession() as session:
@@ -170,35 +172,64 @@ async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
                 url,
                 json=payload,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=120),
+                timeout=aiohttp.ClientTimeout(total=180),
             ) as resp:
+                raw_text = await resp.text()
                 try:
-                    data = await resp.json()
+                    data = await resp.json(content_type=None)
                 except Exception:
-                    data = {"raw_response": await resp.text()}
+                    data = {"raw_response": raw_text}
 
                 if resp.status != 200:
-                    raise RuntimeError(
-                        f"LMRouter image API → {resp.status}: {data}"
-                    )
+                    # Часто провайдер не поддерживает response_format — пробуем без него
+                    if resp.status in (400, 422) and "response_format" in str(data).lower():
+                        payload.pop("response_format", None)
+                        async with session.post(
+                            url,
+                            json=payload,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=180),
+                        ) as resp2:
+                            try:
+                                data = await resp2.json(content_type=None)
+                            except Exception:
+                                data = {"raw_response": await resp2.text()}
+                            if resp2.status != 200:
+                                raise RuntimeError(
+                                    f"Image API → {resp2.status}: {data}"
+                                )
+                    else:
+                        raise RuntimeError(
+                            f"Image API → {resp.status}: {data}"
+                        )
 
                 items = data.get("data")
                 if not items:
+                    # Некоторые провайдеры кладут картинку прямо в корень
+                    if data.get("url"):
+                        return ImageResult(kind="url", data=data["url"])
+                    if data.get("b64_json"):
+                        return ImageResult(kind="b64", data=data["b64_json"])
                     raise RuntimeError(
-                        f"LMRouter вернул неожиданный ответ: {data}"
+                        f"Неожиданный ответ image API (нет data[]): {data}"
                     )
 
                 item = items[0]
 
-                if item.get("url"):
-                    return ImageResult(kind="url", data=item["url"])
-
                 if item.get("b64_json"):
                     return ImageResult(kind="b64", data=item["b64_json"])
 
+                if item.get("url"):
+                    return ImageResult(kind="url", data=item["url"])
+
+                # Иногда base64 лежит под другим ключом
+                for key in ("b64", "base64", "image", "image_base64"):
+                    if item.get(key):
+                        return ImageResult(kind="b64", data=item[key])
+
                 raise RuntimeError(
-                    f"В ответе LMRouter нет url или b64_json: {data}"
+                    f"В ответе нет url / b64_json: {data}"
                 )
 
         except aiohttp.ClientError as e:
-            raise RuntimeError(f"Ошибка соединения с LMRouter: {e}") from e
+            raise RuntimeError(f"Ошибка соединения с image API: {e}") from e
