@@ -5,6 +5,7 @@
 (плюс наценка), а не фиксированную цену "за сообщение".
 """
 from dataclasses import dataclass
+import os
 
 import aiohttp
 from openai import AsyncOpenAI
@@ -22,23 +23,36 @@ from config import (
     USD_TO_CREDIT_RATE,
 )
 
-# base_url=None означает "использовать официальный сервер по умолчанию" —
-# так работает и для прямого доступа, и для российских прокси вроде ProxyAPI,
-# если в .env указан OPENAI_BASE_URL / ANTHROPIC_BASE_URL.
+# LMRouter / OpenRouter-подобные шлюзы часто ожидают эти заголовки.
+_DEFAULT_HEADERS = {
+    "HTTP-Referer": os.getenv("HTTP_REFERER", "https://t.me"),
+    "X-Title": os.getenv("X_TITLE", "Telegram Bot"),
+}
+
 openai_client = (
-    AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL) if OPENAI_API_KEY else None
+    AsyncOpenAI(
+        api_key=OPENAI_API_KEY,
+        base_url=OPENAI_BASE_URL,
+        default_headers=_DEFAULT_HEADERS,
+    )
+    if OPENAI_API_KEY
+    else None
 )
 anthropic_client = (
-    AsyncAnthropic(api_key=ANTHROPIC_API_KEY, base_url=ANTHROPIC_BASE_URL) if ANTHROPIC_API_KEY else None
+    AsyncAnthropic(api_key=ANTHROPIC_API_KEY, base_url=ANTHROPIC_BASE_URL)
+    if ANTHROPIC_API_KEY
+    else None
 )
 
-# Отдельный клиент для картинок: если IMAGE_BASE_URL задан и отличается от
-# OPENAI_BASE_URL — используем его. Иначе тот же openai_client.
 _image_base = IMAGE_BASE_URL or OPENAI_BASE_URL
 image_client = None
 if OPENAI_API_KEY:
     if IMAGE_BASE_URL and IMAGE_BASE_URL != OPENAI_BASE_URL:
-        image_client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=IMAGE_BASE_URL)
+        image_client = AsyncOpenAI(
+            api_key=OPENAI_API_KEY,
+            base_url=IMAGE_BASE_URL,
+            default_headers=_DEFAULT_HEADERS,
+        )
     else:
         image_client = openai_client
 
@@ -76,11 +90,6 @@ async def generate(
     history: list[dict] | None = None,
     system_prompt: str | None = None,
 ) -> GenerationResult:
-    """
-    history — список {"role": "user"/"assistant", "content": "..."} для контекста диалога.
-    Если не нужен — оставьте None, бот будет отвечать без памяти прошлых сообщений.
-    system_prompt — задаёт "роль"/поведение модели на весь диалог (режимы /mode).
-    """
     history = history or []
 
     if model in OPENAI_MODELS:
@@ -129,8 +138,6 @@ async def generate(
 
 
 def estimate_max_cost(model: str, max_output_tokens: int = 1024, avg_input_tokens: int = 200) -> float:
-    """Грубая оценка стоимости — используется, чтобы заранее проверить,
-    хватит ли у пользователя баланса, ДО отправки запроса в API."""
     return _tokens_to_credits(model, avg_input_tokens, max_output_tokens)
 
 
@@ -139,25 +146,17 @@ def _auth_error_hint(base: str, model: str) -> str:
         f"401 Unauthorized при генерации картинки.\n"
         f"Запрос шёл на: {base}\n"
         f"Модель: {model}\n\n"
-        f"Что проверить в Railway / .env:\n"
-        f"1. OPENAI_API_KEY — ключ от ТОГО ЖЕ провайдера, чей URL указан\n"
-        f"2. IMAGE_BASE_URL (или OPENAI_BASE_URL) — правильный адрес API\n"
-        f"   Примеры:\n"
-        f"   • ProxyAPI: https://api.proxyapi.ru/openai/v1\n"
-        f"   • LMRouter: https://api.lmrouter.com/openai/v1\n"
-        f"   • Официальный OpenAI: https://api.openai.com/v1\n"
-        f"3. IMAGE_MODEL — слаг модели из каталога вашего провайдера\n"
-        f"4. Ключ не истёк и у него есть доступ к image-моделям"
+        f"Это ответ сервера LMRouter/прокси: ключ не принят.\n\n"
+        f"Проверьте в Railway / .env:\n"
+        f"1. OPENAI_API_KEY — именно ключ из кабинета LMRouter (не OpenAI)\n"
+        f"2. Ключ активен, есть баланс, image-модели разрешены\n"
+        f"3. IMAGE_MODEL — точный слаг из каталога (попробуйте openai/gpt-5-image)\n"
+        f"4. OPENAI_BASE_URL / IMAGE_BASE_URL = https://api.lmrouter.com/openai/v1\n\n"
+        f"Быстрый тест: работает ли обычный текстовый чат с тем же ключом?"
     )
 
 
 async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
-    """
-    Генерация изображения через OpenAI-совместимый images API.
-
-    Сначала пробуем официальный AsyncOpenAI-клиент (корректная авторизация).
-    Если не получилось — fallback на raw aiohttp.
-    """
     if not OPENAI_API_KEY:
         raise RuntimeError(
             "OPENAI_API_KEY не задан в .env — генерация картинок недоступна"
@@ -166,10 +165,9 @@ async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
     model = model or IMAGE_MODEL
     base = (_image_base or "https://api.openai.com/v1").rstrip("/")
 
-    # --- Путь 1: официальный клиент (предпочтительный) ---
+    # --- Путь 1: официальный клиент ---
     if image_client is not None:
         try:
-            # response_format=b64_json удобнее для Telegram
             resp = await image_client.images.generate(
                 model=model,
                 prompt=prompt,
@@ -184,7 +182,6 @@ async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
             raise RuntimeError(f"В ответе клиента нет b64_json/url: {item}")
         except Exception as e:
             err_str = str(e).lower()
-            # Если провайдер не любит response_format — пробуем без него
             if "response_format" in err_str or "unknown parameter" in err_str:
                 try:
                     resp = await image_client.images.generate(
@@ -203,18 +200,18 @@ async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
             if "401" in str(e) or "unauthorized" in str(e).lower() or "invalid_api_key" in str(e).lower():
                 raise RuntimeError(_auth_error_hint(base, model)) from e
 
-            # Не падаем сразу — пробуем raw aiohttp как запасной путь
             last_client_error = e
         else:
             last_client_error = None
     else:
         last_client_error = None
 
-    # --- Путь 2: raw aiohttp (для экзотических провайдеров) ---
+    # --- Путь 2: raw aiohttp ---
     url = f"{base}/images/generations"
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
+        **_DEFAULT_HEADERS,
     }
     payload = {
         "model": model,
@@ -240,7 +237,6 @@ async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
                     raise RuntimeError(_auth_error_hint(base, model))
 
                 if resp.status != 200:
-                    # Повтор без response_format
                     if resp.status in (400, 422) and "response_format" in str(data).lower():
                         payload.pop("response_format", None)
                         async with session.post(
