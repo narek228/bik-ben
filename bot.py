@@ -107,43 +107,41 @@ async def cmd_start(message: Message, command: CommandObject):
         except ValueError:
             referred_by = None
 
-    existing = await db.get_or_create_user(tg_id, message.from_user.username, referred_by=referred_by)
-    user = existing
+    is_new_user = not await db.user_exists(tg_id)
+    user = await db.get_or_create_user(
+        tg_id,
+        message.from_user.username,
+        referred_by=referred_by,
+    )
 
-    # Реферальный бонус начисляется только один раз — при первом /start
-    # с валидным ref_... После повторного /start бонус не выдаётся.
+    # Реферальный бонус выдаём только при самой первой регистрации.
     if (
-        referred_by
+        is_new_user
+        and referred_by
         and referred_by != tg_id
         and user.get("referred_by") == referred_by
-        and user.get("created_at")
     ):
-        referral_bonus_exists = any(
-            t["reason"] == "referral_bonus_newcomer"
-            for t in await db.get_transactions(tg_id, limit=50)
+        await db.add_credits(
+            tg_id,
+            config.REFERRAL_BONUS_FOR_NEWCOMER,
+            "referral_bonus_newcomer",
         )
-        if not referral_bonus_exists:
-            await db.add_credits(
-                tg_id,
-                config.REFERRAL_BONUS_FOR_NEWCOMER,
-                "referral_bonus_newcomer",
-            )
-            await db.add_credits(
+        await db.add_credits(
+            referred_by,
+            config.REFERRAL_BONUS_FOR_REFERRER,
+            "referral_bonus_referrer",
+        )
+        try:
+            await bot.send_message(
                 referred_by,
-                config.REFERRAL_BONUS_FOR_REFERRER,
-                "referral_bonus_referrer",
+                f"По твоей реферальной ссылке зарегистрировался новый пользователь! "
+                f"Начислено {config.REFERRAL_BONUS_FOR_REFERRER} кредитов.",
             )
-            try:
-                await bot.send_message(
-                    referred_by,
-                    f"По твоей реферальной ссылке зарегистрировался новый пользователь! "
-                    f"Начислено {config.REFERRAL_BONUS_FOR_REFERRER} кредитов.",
-                )
-            except Exception:
-                pass
-            user = await db.get_or_create_user(
-                tg_id, message.from_user.username
-            )
+        except Exception:
+            pass
+        user = await db.get_or_create_user(
+            tg_id, message.from_user.username
+        )
 
     await message.answer(
         f"Привет! Я бот-обёртка над ChatGPT и Claude.\n\n"
