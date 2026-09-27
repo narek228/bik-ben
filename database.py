@@ -52,6 +52,21 @@ CREATE INDEX IF NOT EXISTS idx_messages_tg_id ON messages (tg_id, id);
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(CREATE_TABLES_SQL)
+
+        # Миграция старой SQLite-базы: CREATE TABLE IF NOT EXISTS
+        # не добавляет новые колонки в уже существующую таблицу.
+        cur = await db.execute("PRAGMA table_info(users)")
+        columns = {row[1] for row in await cur.fetchall()}
+
+        if "mode" not in columns:
+            await db.execute(
+                "ALTER TABLE users ADD COLUMN mode TEXT NOT NULL DEFAULT 'default'"
+            )
+        if "referred_by" not in columns:
+            await db.execute(
+                "ALTER TABLE users ADD COLUMN referred_by INTEGER"
+            )
+
         await db.commit()
 
 
@@ -190,6 +205,53 @@ async def mark_payment_paid(payment_id: str):
             "UPDATE pending_payments SET status = 'paid' WHERE payment_id = ?", (payment_id,)
         )
         await db.commit()
+
+
+async def complete_pending_payment(
+    payment_id: str,
+    reason: str,
+) -> dict | None:
+    """
+    Атомарно завершает pending-платёж и начисляет кредиты ровно один раз.
+
+    Webhook и фоновый polling могут прийти одновременно, поэтому проверка
+    статуса и начисление должны выполняться внутри одной транзакции.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+
+        cur = await db.execute(
+            "SELECT * FROM pending_payments WHERE payment_id = ?",
+            (payment_id,),
+        )
+        row = await cur.fetchone()
+
+        if not row or row["status"] != "pending":
+            await db.rollback()
+            return None
+
+        await db.execute(
+            "UPDATE users SET balance = balance + ? WHERE tg_id = ?",
+            (row["amount_credits"], row["tg_id"]),
+        )
+        await db.execute(
+            "INSERT INTO transactions (tg_id, amount, reason, payment_id) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                row["tg_id"],
+                row["amount_credits"],
+                reason,
+                payment_id,
+            ),
+        )
+        await db.execute(
+            "UPDATE pending_payments SET status = 'paid' WHERE payment_id = ?",
+            (payment_id,),
+        )
+        await db.commit()
+
+        return dict(row)
 
 
 # ---------- Память диалога ----------
