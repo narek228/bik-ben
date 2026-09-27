@@ -47,13 +47,7 @@ anthropic_client = (
 def _normalize_image_base(url: str | None) -> str | None:
     if not url:
         return None
-    value = url.strip().rstrip("/")
-    # Совместимость со старым адресом LMRouter.
-    if "mlrouter.ru" in value:
-        return "https://api.lmrouter.com/openai/v1"
-    if value == "https://api.lmrouter.com":
-        return "https://api.lmrouter.com/openai/v1"
-    return value
+    return url.strip().rstrip("/")
 
 
 _image_base = _normalize_image_base(IMAGE_BASE_URL or OPENAI_BASE_URL)
