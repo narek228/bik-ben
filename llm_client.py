@@ -164,6 +164,7 @@ async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
 
     model = model or IMAGE_MODEL
     base = (_image_base or "https://api.openai.com/v1").rstrip("/")
+    # LMRouter uses the OpenAI-compatible /openai/v1 image endpoint.
 
     # --- Путь 1: официальный клиент ---
     if image_client is not None:
