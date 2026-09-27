@@ -60,7 +60,7 @@ DEFAULT_MODEL = "gpt-4o-mini"
 # Слаг модели для картинок. По умолчанию dall-e-3 (официальный OpenAI / большинство прокси).
 # Если используете LMRouter / другой агрегатор — укажите актуальный слаг из их каталога
 # через переменную IMAGE_MODEL в Railway / .env (не правьте код).
-IMAGE_MODEL = os.getenv("IMAGE_MODEL", "dall-e-3")
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "kling-v3-image")
 
 # Фиксированная цена одной картинки в кредитах.
 IMAGE_COST_CREDITS = float(os.getenv("IMAGE_COST_CREDITS", "15"))
