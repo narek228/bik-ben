@@ -163,6 +163,13 @@ def _auth_error_hint(base: str, model: str) -> str:
 
 
 async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
+    """
+    Генерация изображения.
+
+    Для kling-v3-image используется асинхронный Queue API провайдера:
+    POST /v1/queue/kling-v3-image -> polling status -> GET response.
+    Остальные модели сохраняют старый OpenAI-compatible путь.
+    """
     if not OPENAI_API_KEY:
         raise RuntimeError(
             "OPENAI_API_KEY не задан в .env — генерация картинок недоступна"
@@ -170,9 +177,141 @@ async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
 
     model = model or IMAGE_MODEL
     base = (_image_base or "https://api.openai.com/v1").rstrip("/")
-    # LMRouter uses the OpenAI-compatible /openai/v1 image endpoint.
 
-    # --- Путь 1: официальный клиент ---
+    if model == "kling-v3-image":
+        create_url = f"{base}/queue/kling-v3-image"
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+            **_DEFAULT_HEADERS,
+        }
+        payload = {
+            "prompt": prompt[:2500],
+            "negative_prompt": "",
+            "resolution": "1k",
+            "n": 1,
+            "aspect_ratio": "16:9",
+            "watermark_info": {"enabled": False},
+        }
+
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(
+                    create_url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as resp:
+                    try:
+                        data = await resp.json(content_type=None)
+                    except Exception:
+                        data = {"raw_response": await resp.text()}
+
+                    if resp.status == 401:
+                        raise RuntimeError(
+                            f"MLRouter: API-ключ не принят при создании задачи: {data}"
+                        )
+                    if resp.status not in (200, 201, 202):
+                        raise RuntimeError(
+                            f"Kling Image API → {resp.status}: {data}"
+                        )
+
+                request_id = data.get("request_id")
+                status_url = data.get("status_url")
+                response_url = data.get("response_url")
+
+                if not request_id:
+                    raise RuntimeError(
+                        f"Kling Image API не вернул request_id: {data}"
+                    )
+
+                if not status_url:
+                    status_url = (
+                        f"{base}/queue/kling-v3-image/requests/"
+                        f"{request_id}/status"
+                    )
+                if not response_url:
+                    response_url = (
+                        f"{base}/queue/kling-v3-image/requests/"
+                        f"{request_id}/response"
+                    )
+
+                # OdiRouter рекомендует polling каждые 2–5 секунд.
+                # Ограничиваем ожидание 3 минутами, чтобы не зависать бесконечно.
+                for _ in range(36):
+                    await asyncio.sleep(5)
+
+                    async with session.get(
+                        status_url,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as status_resp:
+                        try:
+                            status_data = await status_resp.json(content_type=None)
+                        except Exception:
+                            status_data = {"raw_response": await status_resp.text()}
+
+                    if status_resp.status not in (200, 202):
+                        raise RuntimeError(
+                            f"Kling status API → {status_resp.status}: {status_data}"
+                        )
+
+                    status = str(status_data.get("status", "")).upper()
+
+                    if status in {"IN_QUEUE", "IN_PROGRESS", "PENDING", "PROCESSING"}:
+                        continue
+
+                    if status in {"FAILED", "ERROR", "CANCELED", "CANCELLED"}:
+                        raise RuntimeError(
+                            f"Kling задача завершилась ошибкой: "
+                            f"{status_data.get('error') or status_data}"
+                        )
+
+                    if status == "COMPLETED":
+                        if status_data.get("error"):
+                            raise RuntimeError(
+                                f"Kling задача завершилась ошибкой: "
+                                f"{status_data.get('error')}"
+                            )
+                        break
+                else:
+                    raise RuntimeError(
+                        "Kling Image API: превышено время ожидания генерации (3 минуты)"
+                    )
+
+                async with session.get(
+                    response_url,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as result_resp:
+                    try:
+                        result_data = await result_resp.json(content_type=None)
+                    except Exception:
+                        result_data = {"raw_response": await result_resp.text()}
+
+                    if result_resp.status not in (200, 202):
+                        raise RuntimeError(
+                            f"Kling result API → {result_resp.status}: {result_data}"
+                        )
+
+                    if result_data.get("error"):
+                        raise RuntimeError(
+                            f"Kling result API: {result_data.get('error')}"
+                        )
+
+                    for output in result_data.get("output", []):
+                        for item in output.get("content", []):
+                            if item.get("type") == "image" and item.get("url"):
+                                return ImageResult(kind="url", data=item["url"])
+
+                    raise RuntimeError(
+                        f"Kling API не вернул URL изображения: {result_data}"
+                    )
+
+            except aiohttp.ClientError as e:
+                raise RuntimeError(f"Ошибка соединения с Kling Image API: {e}") from e
+
+    # --- Старый OpenAI-compatible путь для остальных image-моделей ---
     if image_client is not None:
         try:
             resp = await image_client.images.generate(
@@ -205,15 +344,15 @@ async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
                     e = e2
 
             if "401" in str(e) or "unauthorized" in str(e).lower() or "invalid_api_key" in str(e).lower():
-                raise RuntimeError(_auth_error_hint(base, model)) from e
+                raise RuntimeError(
+                    f"401 Unauthorized при генерации картинки. "
+                    f"Проверьте API-ключ и доступ к модели {model}."
+                ) from e
 
             last_client_error = e
-        else:
-            last_client_error = None
     else:
         last_client_error = None
 
-    # --- Путь 2: raw aiohttp ---
     url = f"{base}/images/generations"
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -241,7 +380,10 @@ async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
                     data = {"raw_response": await resp.text()}
 
                 if resp.status == 401:
-                    raise RuntimeError(_auth_error_hint(base, model))
+                    raise RuntimeError(
+                        f"401 Unauthorized при генерации картинки. "
+                        f"Проверьте API-ключ и доступ к модели {model}."
+                    )
 
                 if resp.status != 200:
                     if resp.status in (400, 422) and "response_format" in str(data).lower():
@@ -257,7 +399,10 @@ async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
                             except Exception:
                                 data = {"raw_response": await resp2.text()}
                             if resp2.status == 401:
-                                raise RuntimeError(_auth_error_hint(base, model))
+                                raise RuntimeError(
+                                    f"401 Unauthorized при генерации картинки. "
+                                    f"Проверьте API-ключ и доступ к модели {model}."
+                                )
                             if resp2.status != 200:
                                 raise RuntimeError(f"Image API → {resp2.status}: {data}")
                     else:
