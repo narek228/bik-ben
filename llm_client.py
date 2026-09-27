@@ -197,25 +197,47 @@ async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
 
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.post(
-                    create_url,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=60),
-                ) as resp:
-                    try:
-                        data = await resp.json(content_type=None)
-                    except Exception:
-                        data = {"raw_response": await resp.text()}
+                # Временная недоступность backend-модели (503) не означает
+                # ошибку запроса. Делаем несколько повторов с backoff.
+                data = None
+                last_503 = None
+                for attempt in range(4):
+                    async with session.post(
+                        create_url,
+                        json=payload,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=60),
+                    ) as resp:
+                        try:
+                            body = await resp.json(content_type=None)
+                        except Exception:
+                            body = {"raw_response": await resp.text()}
 
-                    if resp.status == 401:
-                        raise RuntimeError(
-                            f"MLRouter: API-ключ не принят при создании задачи: {data}"
-                        )
-                    if resp.status not in (200, 201, 202):
-                        raise RuntimeError(
-                            f"Kling Image API → {resp.status}: {data}"
-                        )
+                        if resp.status == 503:
+                            last_503 = body
+                            if attempt < 3:
+                                await asyncio.sleep(3 * (attempt + 1))
+                                continue
+                            raise RuntimeError(
+                                f"Kling Image API → 503 после 4 попыток: {body}"
+                            )
+
+                        if resp.status == 401:
+                            raise RuntimeError(
+                                f"MLRouter: API-ключ не принят при создании задачи: {body}"
+                            )
+                        if resp.status not in (200, 201, 202):
+                            raise RuntimeError(
+                                f"Kling Image API → {resp.status}: {body}"
+                            )
+
+                        data = body
+                        break
+
+                if not data:
+                    raise RuntimeError(
+                        f"Kling Image API не вернул ответ: {last_503}"
+                    )
 
                 request_id = data.get("request_id")
                 status_url = data.get("status_url")
