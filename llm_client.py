@@ -44,13 +44,25 @@ anthropic_client = (
     else None
 )
 
-_image_base = IMAGE_BASE_URL or OPENAI_BASE_URL
+def _normalize_image_base(url: str | None) -> str | None:
+    if not url:
+        return None
+    value = url.strip().rstrip("/")
+    # Совместимость со старым адресом LMRouter.
+    if "mlrouter.ru" in value:
+        return "https://api.lmrouter.com/openai/v1"
+    if value == "https://api.lmrouter.com":
+        return "https://api.lmrouter.com/openai/v1"
+    return value
+
+
+_image_base = _normalize_image_base(IMAGE_BASE_URL or OPENAI_BASE_URL)
 image_client = None
 if OPENAI_API_KEY:
-    if IMAGE_BASE_URL and IMAGE_BASE_URL != OPENAI_BASE_URL:
+    if _image_base and _image_base != OPENAI_BASE_URL:
         image_client = AsyncOpenAI(
             api_key=OPENAI_API_KEY,
-            base_url=IMAGE_BASE_URL,
+            base_url=_image_base,
             default_headers=_DEFAULT_HEADERS,
         )
     else:
