@@ -110,19 +110,40 @@ async def cmd_start(message: Message, command: CommandObject):
     existing = await db.get_or_create_user(tg_id, message.from_user.username, referred_by=referred_by)
     user = existing
 
-    actual_referrer = await db.get_referrer(tg_id)
-    if referred_by and actual_referrer == referred_by:
-        await db.add_credits(tg_id, config.REFERRAL_BONUS_FOR_NEWCOMER, "referral_bonus_newcomer")
-        await db.add_credits(referred_by, config.REFERRAL_BONUS_FOR_REFERRER, "referral_bonus_referrer")
-        try:
-            await bot.send_message(
-                referred_by,
-                f"По твоей реферальной ссылке зарегистрировался новый пользователь! "
-                f"Начислено {config.REFERRAL_BONUS_FOR_REFERRER} кредитов.",
+    # Реферальный бонус начисляется только один раз — при первом /start
+    # с валидным ref_... После повторного /start бонус не выдаётся.
+    if (
+        referred_by
+        and referred_by != tg_id
+        and user.get("referred_by") == referred_by
+        and user.get("created_at")
+    ):
+        referral_bonus_exists = any(
+            t["reason"] == "referral_bonus_newcomer"
+            for t in await db.get_transactions(tg_id, limit=50)
+        )
+        if not referral_bonus_exists:
+            await db.add_credits(
+                tg_id,
+                config.REFERRAL_BONUS_FOR_NEWCOMER,
+                "referral_bonus_newcomer",
             )
-        except Exception:
-            pass
-        user = await db.get_or_create_user(tg_id, message.from_user.username)
+            await db.add_credits(
+                referred_by,
+                config.REFERRAL_BONUS_FOR_REFERRER,
+                "referral_bonus_referrer",
+            )
+            try:
+                await bot.send_message(
+                    referred_by,
+                    f"По твоей реферальной ссылке зарегистрировался новый пользователь! "
+                    f"Начислено {config.REFERRAL_BONUS_FOR_REFERRER} кредитов.",
+                )
+            except Exception:
+                pass
+            user = await db.get_or_create_user(
+                tg_id, message.from_user.username
+            )
 
     await message.answer(
         f"Привет! Я бот-обёртка над ChatGPT и Claude.\n\n"
@@ -193,6 +214,9 @@ async def cmd_mode(message: Message):
 @dp.callback_query(F.data.startswith("setmode:"))
 async def cb_set_mode(callback: CallbackQuery):
     mode = callback.data.split(":", 1)[1]
+    if mode not in config.PROMPT_MODES:
+        await callback.answer("Неизвестный режим.", show_alert=True)
+        return
     await db.set_mode(callback.from_user.id, mode)
     label = config.PROMPT_MODES[mode]["label"]
     await callback.message.edit_text(f"Режим установлен: <b>{label}</b>")
@@ -213,6 +237,9 @@ async def cmd_model(message: Message):
 @dp.callback_query(F.data.startswith("setmodel:"))
 async def cb_set_model(callback: CallbackQuery):
     model = callback.data.split(":", 1)[1]
+    if model not in MODEL_LABELS:
+        await callback.answer("Неизвестная модель.", show_alert=True)
+        return
     await db.set_model(callback.from_user.id, model)
     await callback.message.edit_text(f"Модель установлена: <b>{MODEL_LABELS[model]}</b>")
     await callback.answer()
@@ -243,8 +270,22 @@ async def cmd_topup(message: Message):
 
 @dp.callback_query(F.data.startswith("topup:"))
 async def cb_topup(callback: CallbackQuery):
-    _, provider, amount_str = callback.data.split(":")
-    amount = float(amount_str)
+    parts = callback.data.split(":")
+    if len(parts) != 3 or parts[1] not in {"yoomoney", "yookassa"}:
+        await callback.answer("Некорректный платёж.", show_alert=True)
+        return
+
+    _, provider, amount_str = parts
+    try:
+        amount = float(amount_str)
+    except ValueError:
+        await callback.answer("Некорректная сумма.", show_alert=True)
+        return
+
+    if amount not in TOPUP_OPTIONS_RUB:
+        await callback.answer("Некорректная сумма.", show_alert=True)
+        return
+
     tg_id = callback.from_user.id
     credits_to_add = amount
 
@@ -265,7 +306,7 @@ async def cb_topup(callback: CallbackQuery):
         await callback.answer()
     except Exception as e:
         log.exception("Ошибка создания платежа")
-        await callback.message.answer(f"Не удалось создать платёж: {e}")
+        await callback.message.answer("Не удалось создать платёж. Попробуй ещё раз позже.")
         await callback.answer()
 
 
@@ -448,11 +489,12 @@ async def handle_nowpayments_webhook(request: web.Request):
     if status in ("finished", "confirmed"):
         pending = await db.get_pending_payment(payment_id)
         if pending and pending["status"] == "pending":
-            await db.add_credits(
-                pending["tg_id"], pending["amount_credits"], "topup_crypto", payment_id
+            completed = await db.complete_pending_payment(
+                payment_id, "topup_crypto"
             )
-            await db.mark_payment_paid(payment_id)
-            try:
+            if completed:
+                pending = completed
+                try:
                 await bot.send_message(
                     pending["tg_id"],
                     f"Оплата получена! Начислено {pending['amount_credits']} кредитов.",
@@ -475,11 +517,12 @@ async def handle_yoomoney_webhook(request: web.Request):
     label = form_dict.get("label", "")
     pending = await db.get_pending_payment(label)
     if pending and pending["status"] == "pending":
-        await db.add_credits(
-            pending["tg_id"], pending["amount_credits"], "topup_yoomoney", label
+        completed = await db.complete_pending_payment(
+            label, "topup_yoomoney"
         )
-        await db.mark_payment_paid(label)
-        try:
+        if completed:
+            pending = completed
+            try:
             await bot.send_message(
                 pending["tg_id"],
                 f"Оплата получена! Начислено {pending['amount_credits']} кредитов.",
@@ -505,11 +548,12 @@ async def handle_yookassa_webhook(request: web.Request):
     if event == "payment.succeeded" and status == "succeeded":
         pending = await db.get_pending_payment(payment_id)
         if pending and pending["status"] == "pending":
-            await db.add_credits(
-                pending["tg_id"], pending["amount_credits"], "topup_yookassa", payment_id
+            completed = await db.complete_pending_payment(
+                payment_id, "topup_yookassa"
             )
-            await db.mark_payment_paid(payment_id)
-            try:
+            if completed:
+                pending = completed
+                try:
                 await bot.send_message(
                     pending["tg_id"],
                     f"Оплата получена! Начислено {pending['amount_credits']} кредитов.",
@@ -554,11 +598,12 @@ async def poll_yookassa_pending_payments():
                     continue
 
                 if status == "succeeded":
-                    await db.add_credits(
-                        row["tg_id"], row["amount_credits"], "topup_yookassa", row["payment_id"]
+                    completed = await db.complete_pending_payment(
+                        row["payment_id"], "topup_yookassa"
                     )
-                    await db.mark_payment_paid(row["payment_id"])
-                    try:
+                    if completed:
+                        row = completed
+                        try:
                         await bot.send_message(
                             row["tg_id"],
                             f"Оплата получена! Начислено {row['amount_credits']} кредитов.",
