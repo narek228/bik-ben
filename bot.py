@@ -489,18 +489,15 @@ async def handle_nowpayments_webhook(request: web.Request):
     if status in ("finished", "confirmed"):
         pending = await db.get_pending_payment(payment_id)
         if pending and pending["status"] == "pending":
-            completed = await db.complete_pending_payment(
-                payment_id, "topup_crypto"
-            )
+            completed = await db.complete_pending_payment(payment_id, "topup_crypto")
             if completed:
-                pending = completed
                 try:
-                await bot.send_message(
-                    pending["tg_id"],
-                    f"Оплата получена! Начислено {pending['amount_credits']} кредитов.",
-                )
-            except Exception:
-                pass
+                    await bot.send_message(
+                        completed["tg_id"],
+                        f"Оплата получена! Начислено {completed['amount_credits']} кредитов.",
+                    )
+                except Exception:
+                    pass
 
     return web.Response(status=200, text="ok")
 
@@ -517,18 +514,15 @@ async def handle_yoomoney_webhook(request: web.Request):
     label = form_dict.get("label", "")
     pending = await db.get_pending_payment(label)
     if pending and pending["status"] == "pending":
-        completed = await db.complete_pending_payment(
-            label, "topup_yoomoney"
-        )
+        completed = await db.complete_pending_payment(label, "topup_yoomoney")
         if completed:
-            pending = completed
             try:
-            await bot.send_message(
-                pending["tg_id"],
-                f"Оплата получена! Начислено {pending['amount_credits']} кредитов.",
-            )
-        except Exception:
-            pass
+                await bot.send_message(
+                    completed["tg_id"],
+                    f"Оплата получена! Начислено {completed['amount_credits']} кредитов.",
+                )
+            except Exception:
+                pass
 
     return web.Response(status=200, text="OK")
 
@@ -552,14 +546,13 @@ async def handle_yookassa_webhook(request: web.Request):
                 payment_id, "topup_yookassa"
             )
             if completed:
-                pending = completed
                 try:
-                await bot.send_message(
-                    pending["tg_id"],
-                    f"Оплата получена! Начислено {pending['amount_credits']} кредитов.",
-                )
-            except Exception:
-                pass
+                    await bot.send_message(
+                        completed["tg_id"],
+                        f"Оплата получена! Начислено {completed['amount_credits']} кредитов.",
+                    )
+                except Exception:
+                    pass
 
     return web.Response(status=200, text="ok")
 
@@ -586,15 +579,21 @@ async def poll_yookassa_pending_payments():
             async with aiosqlite.connect(config.DB_PATH) as conn:
                 conn.row_factory = aiosqlite.Row
                 cur = await conn.execute(
-                    "SELECT * FROM pending_payments WHERE provider = 'yookassa' AND status = 'pending'"
+                    "SELECT * FROM pending_payments "
+                    "WHERE provider = 'yookassa' AND status = 'pending'"
                 )
                 rows = await cur.fetchall()
 
             for row in rows:
                 try:
-                    status = await payments.check_yookassa_payment_status(row["payment_id"])
+                    status = await payments.check_yookassa_payment_status(
+                        row["payment_id"]
+                    )
                 except Exception:
-                    log.exception("Ошибка проверки статуса ЮKassa для %s", row["payment_id"])
+                    log.exception(
+                        "Ошибка проверки статуса ЮKassa для %s",
+                        row["payment_id"],
+                    )
                     continue
 
                 if status == "succeeded":
@@ -602,14 +601,14 @@ async def poll_yookassa_pending_payments():
                         row["payment_id"], "topup_yookassa"
                     )
                     if completed:
-                        row = completed
                         try:
-                        await bot.send_message(
-                            row["tg_id"],
-                            f"Оплата получена! Начислено {row['amount_credits']} кредитов.",
-                        )
-                    except Exception:
-                        pass
+                            await bot.send_message(
+                                completed["tg_id"],
+                                f"Оплата получена! Начислено "
+                                f"{completed['amount_credits']} кредитов.",
+                            )
+                        except Exception:
+                            pass
         except Exception:
             log.exception("Ошибка в poll_yookassa_pending_payments")
 
