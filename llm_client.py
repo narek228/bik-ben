@@ -5,6 +5,7 @@
 (плюс наценка), а не фиксированную цену "за сообщение".
 """
 from dataclasses import dataclass
+import asyncio
 import os
 
 import aiohttp
