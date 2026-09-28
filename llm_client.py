@@ -179,160 +179,189 @@ async def generate_image(prompt: str, model: str | None = None) -> ImageResult:
     model = model or IMAGE_MODEL
     base = (_image_base or "https://api.openai.com/v1").rstrip("/")
 
-    if model == "kling-v3-image":
-        create_url = f"{base}/queue/kling-v3-image"
+    if model in {"kling-v3-image", "kling-v1-image"}:
+        # Для Kling используем Queue API. Если V3 временно недоступен,
+        # автоматически пробуем V1 как резервную модель.
+        primary_model = model
+        fallback_model = "kling-v1-image" if model == "kling-v3-image" else None
+        models_to_try = [primary_model] + ([fallback_model] if fallback_model else [])
+
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "Content-Type": "application/json",
             **_DEFAULT_HEADERS,
         }
-        payload = {
-            "prompt": prompt[:2500],
-            "negative_prompt": "",
-            "resolution": "1k",
-            "n": 1,
-            "aspect_ratio": "16:9",
-            "watermark_info": {"enabled": False},
-        }
 
         async with aiohttp.ClientSession() as session:
-            try:
-                # Временная недоступность backend-модели (503) не означает
-                # ошибку запроса. Делаем несколько повторов с backoff.
-                data = None
-                last_503 = None
-                for attempt in range(4):
-                    async with session.post(
-                        create_url,
-                        json=payload,
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=60),
-                    ) as resp:
-                        try:
-                            body = await resp.json(content_type=None)
-                        except Exception:
-                            body = {"raw_response": await resp.text()}
+            last_error = None
 
-                        if resp.status == 503:
-                            last_503 = body
-                            if attempt < 3:
-                                await asyncio.sleep(3 * (attempt + 1))
-                                continue
-                            raise RuntimeError(
-                                f"Kling Image API → 503 после 4 попыток: {body}"
-                            )
+            for kling_model in models_to_try:
+                create_url = f"{base}/queue/{kling_model}"
+                payload = {
+                    "prompt": prompt[:2500],
+                    "negative_prompt": "",
+                    "resolution": "1k",
+                    "n": 1,
+                    "aspect_ratio": "16:9",
+                    "watermark_info": {"enabled": False},
+                }
 
-                        if resp.status == 401:
-                            raise RuntimeError(
-                                f"MLRouter: API-ключ не принят при создании задачи: {body}"
-                            )
-                        if resp.status not in (200, 201, 202):
-                            raise RuntimeError(
-                                f"Kling Image API → {resp.status}: {body}"
-                            )
+                try:
+                    data = None
 
-                        data = body
-                        break
+                    # 503 = временно недоступен backend. Для основной модели
+                    # делаем 4 попытки, затем переходим на fallback.
+                    for attempt in range(4):
+                        async with session.post(
+                            create_url,
+                            json=payload,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=60),
+                        ) as resp:
+                            try:
+                                body = await resp.json(content_type=None)
+                            except Exception:
+                                body = {"raw_response": await resp.text()}
 
-                if not data:
-                    raise RuntimeError(
-                        f"Kling Image API не вернул ответ: {last_503}"
-                    )
+                            if resp.status == 503:
+                                last_error = (
+                                    f"{kling_model}: 503 после {attempt + 1} попытки: {body}"
+                                )
+                                if attempt < 3:
+                                    await asyncio.sleep(3 * (attempt + 1))
+                                    continue
+                                break
 
-                request_id = data.get("request_id")
-                status_url = data.get("status_url")
-                response_url = data.get("response_url")
+                            if resp.status == 401:
+                                raise RuntimeError(
+                                    f"MLRouter: API-ключ не принят при создании задачи: {body}"
+                                )
+                            if resp.status not in (200, 201, 202):
+                                raise RuntimeError(
+                                    f"Kling Image API ({kling_model}) → {resp.status}: {body}"
+                                )
 
-                if not request_id:
-                    raise RuntimeError(
-                        f"Kling Image API не вернул request_id: {data}"
-                    )
+                            data = body
+                            break
 
-                if not status_url:
-                    status_url = (
-                        f"{base}/queue/kling-v3-image/requests/"
-                        f"{request_id}/status"
-                    )
-                if not response_url:
-                    response_url = (
-                        f"{base}/queue/kling-v3-image/requests/"
-                        f"{request_id}/response"
-                    )
-
-                # OdiRouter рекомендует polling каждые 2–5 секунд.
-                # Ограничиваем ожидание 3 минутами, чтобы не зависать бесконечно.
-                for _ in range(36):
-                    await asyncio.sleep(5)
-
-                    async with session.get(
-                        status_url,
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as status_resp:
-                        try:
-                            status_data = await status_resp.json(content_type=None)
-                        except Exception:
-                            status_data = {"raw_response": await status_resp.text()}
-
-                    if status_resp.status not in (200, 202):
-                        raise RuntimeError(
-                            f"Kling status API → {status_resp.status}: {status_data}"
-                        )
-
-                    status = str(status_data.get("status", "")).upper()
-
-                    if status in {"IN_QUEUE", "IN_PROGRESS", "PENDING", "PROCESSING"}:
+                    # Если эта модель недоступна по 503 — пробуем следующую.
+                    if not data:
                         continue
 
-                    if status in {"FAILED", "ERROR", "CANCELED", "CANCELLED"}:
+                    request_id = data.get("request_id")
+                    status_url = data.get("status_url")
+                    response_url = data.get("response_url")
+
+                    if not request_id:
                         raise RuntimeError(
-                            f"Kling задача завершилась ошибкой: "
-                            f"{status_data.get('error') or status_data}"
+                            f"Kling Image API ({kling_model}) не вернул request_id: {data}"
                         )
 
-                    if status == "COMPLETED":
-                        if status_data.get("error"):
+                    if not status_url:
+                        status_url = (
+                            f"{base}/queue/{kling_model}/requests/"
+                            f"{request_id}/status"
+                        )
+                    if not response_url:
+                        response_url = (
+                            f"{base}/queue/{kling_model}/requests/"
+                            f"{request_id}/response"
+                        )
+
+                    # Ждём до 3 минут.
+                    for _ in range(36):
+                        await asyncio.sleep(5)
+
+                        async with session.get(
+                            status_url,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as status_resp:
+                            try:
+                                status_data = await status_resp.json(content_type=None)
+                            except Exception:
+                                status_data = {"raw_response": await status_resp.text()}
+
+                        if status_resp.status not in (200, 202):
                             raise RuntimeError(
-                                f"Kling задача завершилась ошибкой: "
-                                f"{status_data.get('error')}"
+                                f"Kling status API ({kling_model}) → "
+                                f"{status_resp.status}: {status_data}"
                             )
-                        break
-                else:
-                    raise RuntimeError(
-                        "Kling Image API: превышено время ожидания генерации (3 минуты)"
-                    )
 
-                async with session.get(
-                    response_url,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=60),
-                ) as result_resp:
-                    try:
-                        result_data = await result_resp.json(content_type=None)
-                    except Exception:
-                        result_data = {"raw_response": await result_resp.text()}
+                        status = str(status_data.get("status", "")).upper()
 
-                    if result_resp.status not in (200, 202):
+                        if status in {
+                            "IN_QUEUE", "IN_PROGRESS", "PENDING",
+                            "PROCESSING", "QUEUED", "RUNNING",
+                        }:
+                            continue
+
+                        if status in {
+                            "FAILED", "ERROR", "CANCELED", "CANCELLED",
+                        }:
+                            raise RuntimeError(
+                                f"Kling задача ({kling_model}) завершилась ошибкой: "
+                                f"{status_data.get('error') or status_data}"
+                            )
+
+                        if status == "COMPLETED":
+                            if status_data.get("error"):
+                                raise RuntimeError(
+                                    f"Kling задача ({kling_model}) завершилась ошибкой: "
+                                    f"{status_data.get('error')}"
+                                )
+                            break
+                    else:
                         raise RuntimeError(
-                            f"Kling result API → {result_resp.status}: {result_data}"
+                            f"Kling Image API ({kling_model}): "
+                            "превышено время ожидания генерации (3 минуты)"
                         )
 
-                    if result_data.get("error"):
+                    async with session.get(
+                        response_url,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=60),
+                    ) as result_resp:
+                        try:
+                            result_data = await result_resp.json(content_type=None)
+                        except Exception:
+                            result_data = {"raw_response": await result_resp.text()}
+
+                        if result_resp.status not in (200, 202):
+                            raise RuntimeError(
+                                f"Kling result API ({kling_model}) → "
+                                f"{result_resp.status}: {result_data}"
+                            )
+
+                        if result_data.get("error"):
+                            raise RuntimeError(
+                                f"Kling result API ({kling_model}): "
+                                f"{result_data.get('error')}"
+                            )
+
+                        for output in result_data.get("output", []):
+                            for item in output.get("content", []):
+                                if item.get("type") == "image" and item.get("url"):
+                                    return ImageResult(kind="url", data=item["url"])
+
                         raise RuntimeError(
-                            f"Kling result API: {result_data.get('error')}"
+                            f"Kling API ({kling_model}) не вернул URL изображения: "
+                            f"{result_data}"
                         )
 
-                    for output in result_data.get("output", []):
-                        for item in output.get("content", []):
-                            if item.get("type") == "image" and item.get("url"):
-                                return ImageResult(kind="url", data=item["url"])
+                except aiohttp.ClientError as e:
+                    last_error = f"{kling_model}: ошибка соединения: {e}"
+                    continue
+                except RuntimeError as e:
+                    # Ошибки самой задачи не маскируем fallback-моделью:
+                    # fallback предназначен именно для временной недоступности backend.
+                    raise
 
-                    raise RuntimeError(
-                        f"Kling API не вернул URL изображения: {result_data}"
-                    )
-
-            except aiohttp.ClientError as e:
-                raise RuntimeError(f"Ошибка соединения с Kling Image API: {e}") from e
+            raise RuntimeError(
+                "Kling Image API: основная модель временно недоступна. "
+                f"Попытка fallback kling-v1-image также не удалась. "
+                f"Последняя ошибка: {last_error}"
+            )
 
     # --- Старый OpenAI-compatible путь для остальных image-моделей ---
     if image_client is not None:
