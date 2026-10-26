@@ -83,6 +83,49 @@ class HttpClient:
                       headers: dict[str, str] | None = None, provider: str | None = None) -> Any:
         return await self._request("GET", url, params=params, headers=headers, provider=provider)
 
+    async def get_text(self, url: str, headers: dict[str, str] | None = None,
+                       provider: str | None = None) -> str:
+        """Fetch a non-JSON body (RSS/XML). Same retry and breaker behaviour."""
+        name = provider or self.provider
+        if self.breaker.is_open:
+            raise CircuitOpen(name, "circuit breaker open")
+        target = url if url.startswith("http") else f"{self.base_url}{url}"
+        last_error: Exception | None = None
+
+        for attempt in range(1, settings.http_max_retries + 1):
+            try:
+                await limiters.acquire(name, self.rate, self.burst)
+                if self._client is None:
+                    raise RuntimeError("HttpClient used outside its async context manager")
+                response = await self._client.request("GET", target, headers=headers)
+
+                if response.status_code == 429:
+                    self.breaker.record_failure()
+                    raise UpstreamError(name, "rate limited (429)", 429)
+                if response.status_code >= 500:
+                    self.breaker.record_failure()
+                    raise UpstreamError(name, f"server error {response.status_code}", response.status_code)
+                if response.status_code >= 400:
+                    raise UpstreamError(name, f"client error {response.status_code}", response.status_code)
+
+                self.breaker.record_success()
+                return response.text
+
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                last_error = exc
+                self.breaker.record_failure()
+            except UpstreamError as exc:
+                last_error = exc
+                if exc.status_code and exc.status_code < 500 and exc.status_code != 429:
+                    raise
+
+            if attempt < settings.http_max_retries:
+                backoff = min(2 ** (attempt - 1), 8) + random.uniform(0, 0.4)
+                log.warning("%s attempt %s/%s failed: %s", name, attempt, settings.http_max_retries, last_error)
+                await asyncio.sleep(backoff)
+
+        raise UpstreamError(name, f"failed after {settings.http_max_retries} attempts: {last_error}")
+
     async def _request(self, method: str, url: str, params: dict[str, Any] | None = None,
                        headers: dict[str, str] | None = None, provider: str | None = None) -> Any:
         name = provider or self.provider
